@@ -84,6 +84,44 @@ def tl_softmax(A, BLOCK_N: int, BLOCK_M: int):
     B = T.empty((N, M), dtype)
 
     # TODO: Implement this function
+    with T.Kernel(N // BLOCK_N, threads=256) as bx:
+        base_x=bx*BLOCK_N
+        # base_y=by*BLOCK_M
+        
+        maxx_local = T.alloc_fragment((BLOCK_N,), dtype)
+        maxx0_local = T.alloc_fragment((BLOCK_N,), dtype)
+        L_local = T.alloc_fragment((BLOCK_N,), dtype)
+        T.fill(maxx_local, -T.infinity(dtype))
+        T.fill(maxx0_local, -T.infinity(dtype))
+        T.clear(L_local)
+        
+        for base_y in T.Serial(0, M, BLOCK_M):
+            A_local=T.alloc_fragment((BLOCK_N,BLOCK_M), dtype)
+            T.copy(A[base_x,base_y], A_local)
+            T.reduce_max(A_local, maxx_local, dim=-1, clear=False)
+            
+            # L_local *= exp(old_max - new_max)
+            for i in T.Parallel(BLOCK_N):
+                L_local[i] = L_local[i]*T.exp2((maxx0_local[i]-maxx_local[i])*log2_e)
+            
+            # L_local[i] += exp(A[i,j]-maxx_local[i])
+            for (i,j) in T.Parallel(BLOCK_N, BLOCK_M):
+                A_local[i,j]=T.exp2((A_local[i,j]-maxx_local[i])*log2_e)
+            T.reduce_sum(A_local, L_local, dim=-1, clear=False)
+            
+            T.copy(maxx_local, maxx0_local)
+        
+        for i in T.Parallel(BLOCK_N):
+            L_local[i] = 1/L_local[i]
+        
+        for base_y in T.Serial(0, M, BLOCK_M):
+            A_local=T.alloc_fragment((BLOCK_N,BLOCK_M), dtype)
+            T.copy(A[base_x,base_y], A_local)
+            
+            for (i,j) in T.Parallel(BLOCK_N, BLOCK_M):
+                A_local[i,j]=T.exp2((A_local[i,j]-maxx_local[i])*log2_e)*L_local[i]
+            
+            T.copy(A_local, B[base_x, base_y])
 
     return B
 
