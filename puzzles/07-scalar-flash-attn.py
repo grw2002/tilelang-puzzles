@@ -82,6 +82,56 @@ def tl_scalar_flash_attn(Q, K, V, BLOCK_B: int, BLOCK_S: int):
     O = T.empty((B, S), dtype)
 
     # TODO: Implement this function
+    with T.Kernel(B // BLOCK_B, threads=256) as bx:
+        base_x=bx*BLOCK_B
+        
+        maxx_local = T.alloc_fragment((BLOCK_B, ), dtype)
+        maxx0_local = T.alloc_fragment((BLOCK_B, ), dtype)
+        L_local = T.alloc_fragment((BLOCK_B, ), dtype)
+        T.fill(maxx_local, -T.infinity(dtype))
+        T.fill(maxx0_local, -T.infinity(dtype))
+        T.clear(L_local)
+        
+        for base_y in T.Serial(0, S, BLOCK_S):
+            Q_local = T.alloc_fragment((BLOCK_B,BLOCK_S), dtype)
+            K_local = T.alloc_fragment((BLOCK_B,BLOCK_S), dtype)
+            QK_local = T.alloc_fragment((BLOCK_B,BLOCK_S), dtype)
+            
+            T.copy(Q[base_x,base_y], Q_local)
+            T.copy(K[base_x,base_y], K_local)
+            
+            for (i,j) in T.Parallel(BLOCK_B, BLOCK_S):
+                QK_local[i,j] = Q_local[i,j]*K_local[i,j]
+            
+            T.reduce_max(QK_local, maxx_local, dim=-1, clear=False)
+            
+            for i in T.Parallel(BLOCK_B):
+                L_local[i] = L_local[i] * T.exp2((maxx0_local[i]-maxx_local[i])*log2_e)
+            
+            for (i,j) in T.Parallel(BLOCK_B, BLOCK_S):
+                QK_local[i,j] = T.exp2((QK_local[i,j] - maxx_local[i])*log2_e)
+            T.reduce_sum(QK_local, L_local, dim=-1, clear=False)
+            
+            T.copy(maxx_local, maxx0_local)
+        
+        for i in T.Parallel(BLOCK_B):
+            L_local[i] = 1/L_local[i]
+        
+        for base_y in T.Serial(0, S, BLOCK_S):
+            Q_local = T.alloc_fragment((BLOCK_B,BLOCK_S), dtype)
+            K_local = T.alloc_fragment((BLOCK_B,BLOCK_S), dtype)
+            V_local = T.alloc_fragment((BLOCK_B,BLOCK_S), dtype)
+            O_local = T.alloc_fragment((BLOCK_B,BLOCK_S), dtype)
+            
+            T.copy(Q[base_x,base_y], Q_local)
+            T.copy(K[base_x,base_y], K_local)
+            T.copy(V[base_x,base_y], V_local)
+            
+            for (i,j) in T.Parallel(BLOCK_B, BLOCK_S):
+                O_local[i,j]=T.exp2((Q_local[i,j]*K_local[i,j]-maxx_local[i])*log2_e) * L_local[i] * V_local[i,j]
+            
+            T.copy(O_local, O[base_x, base_y])
+            
 
     return O
 
