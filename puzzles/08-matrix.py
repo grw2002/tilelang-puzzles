@@ -63,6 +63,21 @@ def tl_gemv(A, B, BLOCK_M: int, BLOCK_K: int):
     C = T.empty((M,), dtype)
 
     # TODO: Implement this function
+    with T.Kernel(M // BLOCK_M, threads=256) as bx:
+        base_x = bx*BLOCK_M
+        C_local = T.alloc_fragment((BLOCK_M,), accum_dtype)
+        A_local = T.alloc_fragment((BLOCK_M, BLOCK_K), dtype)
+        B_local = T.alloc_fragment((BLOCK_K,),dtype)
+        AB_local = T.alloc_fragment((BLOCK_M, BLOCK_K), accum_dtype)
+        
+        T.clear(C_local)
+        for base_y in T.Serial(0, K, BLOCK_K):
+            T.copy(A[base_x, base_y], A_local)
+            T.copy(B[base_y], B_local)
+            for (i,j) in T.Parallel(BLOCK_M, BLOCK_K):
+                AB_local[i,j] = A_local[i,j].astype(accum_dtype)*B_local[j].astype(accum_dtype)
+            T.reduce_sum(AB_local, C_local, dim=-1, clear=False)
+        T.copy(C_local, C[base_x]) # type, why?
     
     return C
 
@@ -144,6 +159,26 @@ def tl_matmul_naive(A, B, BLOCK_M: int, BLOCK_N: int, BLOCK_K: int):
     C = T.empty((M, N), dtype)
 
     # TODO: Implement this function
+    with T.Kernel(M // BLOCK_M, N // BLOCK_N, threads=256) as (bx,by):
+        base_x = bx * BLOCK_M
+        base_y = by * BLOCK_N
+        
+        A_local = T.alloc_fragment((BLOCK_M, BLOCK_K), dtype)
+        B_local = T.alloc_fragment((BLOCK_K, BLOCK_N), dtype)
+        C_local = T.alloc_fragment((BLOCK_M, BLOCK_N), accum_dtype)
+        # AB_local = T.alloc_fragment((BLOCK_M, BLOCK_N, BLOCK_K), accum_dtype)
+        
+        T.clear(C_local)
+        
+        for base_k in T.Serial(0, K, BLOCK_K):
+            T.copy(A[base_x, base_k], A_local)
+            T.copy(B[base_k, base_y], B_local)
+            T.gemm(A_local, B_local, C_local, clear_accum=False)
+            # for (i,j,k) in T.Parallel(BLOCK_M, BLOCK_N, BLOCK_K):
+            #     AB_local[i,j,k]=A_local[i,k].astype(accum_dtype)*B_local[k,j].astype(accum_dtype)
+            # T.reduce_sum(AB_local, C_local, dim=-1, clear=False)
+        
+        T.copy(C_local, C[base_x, base_y])
 
     return C
 
@@ -218,6 +253,22 @@ def tl_matmul_opt(A, B, BLOCK_M: int, BLOCK_N: int, BLOCK_K: int):
     C = T.empty((M, N), dtype)
 
     # TODO: Implement this function
+    with T.Kernel(M // BLOCK_M, N // BLOCK_N, threads=256) as (bx,by):
+        base_x = bx * BLOCK_M
+        base_y = by * BLOCK_N
+        
+        A_local = T.alloc_shared((BLOCK_M, BLOCK_K), dtype)
+        B_local = T.alloc_shared((BLOCK_K, BLOCK_N), dtype)
+        C_local = T.alloc_fragment((BLOCK_M, BLOCK_N), accum_dtype)
+        
+        T.clear(C_local)
+        
+        for bk in T.Pipelined(K // BLOCK_K, num_stages=3):
+            T.copy(A[base_x, bk*BLOCK_K], A_local)
+            T.copy(B[bk*BLOCK_K, base_y], B_local)
+            T.gemm(A_local, B_local, C_local, clear_accum=False)
+        
+        T.copy(C_local, C[base_x, base_y])
 
     return C
 
